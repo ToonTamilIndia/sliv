@@ -493,7 +493,7 @@ def _media_m3u8_to_mpd(media_text: str, bandwidth: int = 1000000, codecs: str | 
 
     return (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-        "<MPD availabilityStartTime=\"2024-01-01T00:00:00Z\" xmlns=\"urn:mpeg:dash:schema:mpd:2011\" "
+        f"<MPD availabilityStartTime=\"{now_iso}\" xmlns=\"urn:mpeg:dash:schema:mpd:2011\" "
         "type=\"dynamic\" "
         "profiles=\"urn:mpeg:dash:profile:isoff-live:2011\" "
         f"minimumUpdatePeriod=\"PT{min_update}S\" "
@@ -626,7 +626,7 @@ def _build_mpd_from_reps(video_reps: list[dict[str, Any]], audio_reps: list[dict
 
     return (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-        "<MPD availabilityStartTime=\"2024-01-01T00:00:00Z\" xmlns=\"urn:mpeg:dash:schema:mpd:2011\" "
+        f"<MPD availabilityStartTime=\"{now_iso}\" xmlns=\"urn:mpeg:dash:schema:mpd:2011\" "
         "type=\"dynamic\" profiles=\"urn:mpeg:dash:profile:isoff-live:2011\" "
         f"minimumUpdatePeriod=\"PT{max(1, min_update)}S\" "
         "timeShiftBufferDepth=\"PT120S\" suggestedPresentationDelay=\"PT8S\" "
@@ -671,14 +671,22 @@ def _parse_media_segments_with_keys(media_text: str, base_url: str, referer: str
             continue
         if line.startswith("#EXT-X-KEY:"):
             attrs = _parse_attr_list(line)
-            uri = attrs.get("URI")
-            current_key_url = _safe_join(base_url, uri) if uri else None
-            iv = attrs.get("IV")
-            if iv and iv.lower().startswith("0x"):
-                current_iv_hex = iv[2:]
-            elif iv:
-                current_iv_hex = iv
+            method = attrs.get("METHOD", "").strip().upper()
+
+            # Only full-segment AES-128 can be transparently decrypted in proxy mode.
+            # SAMPLE-AES and other methods should not trigger segment decryption here.
+            if method == "AES-128":
+                uri = attrs.get("URI")
+                current_key_url = _safe_join(base_url, uri) if uri else None
+                iv = attrs.get("IV")
+                if iv and iv.lower().startswith("0x"):
+                    current_iv_hex = iv[2:]
+                elif iv:
+                    current_iv_hex = iv
+                else:
+                    current_iv_hex = None
             else:
+                current_key_url = None
                 current_iv_hex = None
             continue
         if line.startswith("#"):
@@ -717,6 +725,23 @@ def _count_keyed_segments(segments: list[dict[str, Any]]) -> int:
     return count
 
 
+def _looks_like_mpeg_ts(payload: bytes) -> bool:
+    if len(payload) < 188:
+        return False
+    if payload[0] != 0x47:
+        return False
+
+    packets = min(8, len(payload) // 188)
+    if packets <= 1:
+        return payload[0] == 0x47
+
+    sync_hits = 0
+    for i in range(packets):
+        if payload[i * 188] == 0x47:
+            sync_hits += 1
+    return sync_hits >= max(2, int(packets * 0.75))
+
+
 def _decrypt_dash_if_needed(body: bytes, target: dict[str, Any], referer: str | None) -> bytes:
     key_url = target.get("key_url")
     iv_hex = target.get("iv_hex")
@@ -739,7 +764,11 @@ def _decrypt_dash_if_needed(body: bytes, target: dict[str, Any], referer: str | 
         pad = decrypted[-1]
         if 1 <= pad <= 16 and decrypted.endswith(bytes([pad]) * pad):
             decrypted = decrypted[:-pad]
-        return decrypted
+
+        # Guard against wrong key/IV producing garbage that breaks decoders.
+        if _looks_like_mpeg_ts(decrypted):
+            return decrypted
+        return body
     except Exception:  # noqa: BLE001
         return body
 
