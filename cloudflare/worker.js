@@ -381,13 +381,22 @@ function parseMediaSegmentsWithKeys(mediaText, baseUrl, referer, requestUrl, sig
 
     if (line.startsWith("#EXT-X-KEY:")) {
       const attrs = parseAttrList(line);
-      const uri = attrs.URI;
-      currentKeyUrl = uri ? safeJoin(baseUrl, uri) : null;
-      const iv = attrs.IV;
-      if (iv && iv.toLowerCase().startsWith("0x")) {
-        currentIvHex = iv.slice(2);
+      const method = (attrs.METHOD || "").trim().toUpperCase();
+
+      // Only full-segment AES-128 can be transparently decrypted in proxy mode.
+      // SAMPLE-AES and other methods should not trigger segment decryption here.
+      if (method === "AES-128") {
+        const uri = attrs.URI;
+        currentKeyUrl = uri ? safeJoin(baseUrl, uri) : null;
+        const iv = attrs.IV;
+        if (iv && iv.toLowerCase().startsWith("0x")) {
+          currentIvHex = iv.slice(2);
+        } else {
+          currentIvHex = iv || null;
+        }
       } else {
-        currentIvHex = iv || null;
+        currentKeyUrl = null;
+        currentIvHex = null;
       }
       continue;
     }
@@ -496,12 +505,26 @@ function buildMpdFromReps(videoReps, audioReps, minUpdate) {
 
   return (
     '<?xml version="1.0" encoding="UTF-8"?>' +
-    '<MPD availabilityStartTime="2024-01-01T00:00:00Z" xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" profiles="urn:mpeg:dash:profile:isoff-live:2011" ' +
+    `<MPD availabilityStartTime="${nowIso}" xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" profiles="urn:mpeg:dash:profile:isoff-live:2011" ` +
     `minimumUpdatePeriod="PT${Math.max(1, minUpdate)}S" timeShiftBufferDepth="PT120S" suggestedPresentationDelay="PT8S" publishTime="${nowIso}">` +
     '<Period id="1" start="PT0S">' +
     `<AdaptationSet id="1" mimeType="video/mp2t" segmentAlignment="true">${videoXml}</AdaptationSet>` +
     `${audioSet}</Period></MPD>\n`
   );
+}
+
+function looksLikeMpegTs(payload) {
+  if (!payload || payload.length < 188) return false;
+  if (payload[0] !== 0x47) return false;
+
+  const packets = Math.min(8, Math.floor(payload.length / 188));
+  if (packets <= 1) return payload[0] === 0x47;
+
+  let syncHits = 0;
+  for (let i = 0; i < packets; i += 1) {
+    if (payload[i * 188] === 0x47) syncHits += 1;
+  }
+  return syncHits >= Math.max(2, Math.floor(packets * 0.75));
 }
 
 async function fetchWithRetry(url, referer) {
@@ -601,10 +624,13 @@ async function decryptDashIfNeeded(body, target, referer) {
           break;
         }
       }
-      if (validPad) return decrypted.slice(0, decrypted.length - pad);
+      if (validPad) {
+        const unpadded = decrypted.slice(0, decrypted.length - pad);
+        return looksLikeMpegTs(unpadded) ? unpadded : body;
+      }
     }
 
-    return decrypted;
+    return looksLikeMpegTs(decrypted) ? decrypted : body;
   } catch (_err) {
     return body;
   }
