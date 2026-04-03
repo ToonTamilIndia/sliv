@@ -49,7 +49,6 @@ CACHE_TTL_PLAYLIST = 2
 CACHE_TTL_SEGMENT = 30
 CACHE_TTL_KEY = 300
 CACHE_TTL_DEFAULT = 10
-CACHE_MAX_ENTRIES = 2000
 
 def _cleanup_cache() -> None:
     with CACHE_LOCK:
@@ -132,12 +131,6 @@ def _cache_set(url: str, referer: str | None, body: bytes, headers: dict[str, st
             "ttl": ttl,
             "created_at": time.time(),
         }
-
-        while len(CACHE_STORE) > CACHE_MAX_ENTRIES:
-            oldest_key = next(iter(CACHE_STORE), None)
-            if oldest_key is None:
-                break
-            CACHE_STORE.pop(oldest_key, None)
 
 
 def _cache_ttl_for(url: str, headers: dict[str, str] | None = None) -> int:
@@ -231,7 +224,7 @@ def _safe_url(url: str) -> str:
         return f"https:{url}"
     if "://" not in url:
         return f"https://{url.lstrip('/')}"
-    stripped = url.split("://", 1)[1].lstrip("/") if "://" in url else url.lstrip("/")
+    stripped = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", url).lstrip("/")
     return f"https://{stripped}"
 
 
@@ -587,9 +580,14 @@ def _segment_list_xml(media_sequence: int, target_duration: float, segments: lis
             timeline.append((d, 1))
 
     timeline_xml = []
+    t = int(round(media_sequence * target_duration * timescale))
+    first = True
     for d, count in timeline:
         r = count - 1
-        timeline_xml.append(f'<S d="{d}" r="{r}"/>' if r > 0 else f'<S d="{d}"/>')
+        t_attr = f' t="{t}"' if first else ""
+        first = False
+        timeline_xml.append(f'<S{t_attr} d="{d}" r="{r}"/>' if r > 0 else f'<S{t_attr} d="{d}"/>')
+        t += d * count
 
     segment_urls_xml: list[str] = []
     for segment in segments:
@@ -716,7 +714,6 @@ def _parse_media_segments_with_keys(media_text: str, base_url: str, referer: str
             seq_num = media_sequence + segment_index
             if seq_num < 0:
                 seq_num = 0
-            seq_num = seq_num % (1 << 128)
             iv_hex = seq_num.to_bytes(16, byteorder="big", signed=False).hex()
 
         proxy_segment_url = _proxy_url(
@@ -752,13 +749,13 @@ def _looks_like_mpeg_ts(payload: bytes) -> bool:
         return False
 
     packets = min(8, len(payload) // 188)
+    if packets <= 3:
+        return payload[0] == 0x47
 
     sync_hits = 0
     for i in range(packets):
         if payload[i * 188] == 0x47:
             sync_hits += 1
-    if packets <= 2:
-        return sync_hits == packets
     return sync_hits >= max(2, int(packets * 0.75))
 
 
@@ -781,8 +778,6 @@ def _decrypt_dash_if_needed(body: bytes, target: dict[str, Any], referer: str | 
 
         cipher = AES.new(key, AES.MODE_CBC, iv)
         decrypted = cipher.decrypt(body)
-        if len(decrypted) == 0:
-            return body
         pad = decrypted[-1]
         if 1 <= pad <= 16 and decrypted.endswith(bytes([pad]) * pad):
             decrypted = decrypted[:-pad]
