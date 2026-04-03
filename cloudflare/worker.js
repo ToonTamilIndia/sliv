@@ -7,6 +7,10 @@ const UPSTREAM_SOURCES = [
     template: "https://playyonogames.in/sliv/stream.php?id={id}&e=.m3u8",
     referer: "https://playyonogames.in/",
   },
+  {
+    template: "https://mhdtvhub.com/sliv/stream.php?id={id}&e=.m3u8",
+    referer: "https://mhdtvhub.com/",
+  },
 ];
 
 const TOKEN_TTL_SECONDS = 24 * 60 * 60;
