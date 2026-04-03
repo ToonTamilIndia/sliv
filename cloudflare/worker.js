@@ -434,7 +434,7 @@ async function finalizeSegmentWork(parsed) {
   };
 }
 
-function segmentListXml(mediaSequence, segments, timescale = 1000) {
+function segmentListXml(mediaSequence, targetDuration, segments, timescale = 1000) {
   const timeline = [];
   for (const segment of segments) {
     const d = Math.max(1, Math.round(segment.duration * timescale));
@@ -446,10 +446,15 @@ function segmentListXml(mediaSequence, segments, timescale = 1000) {
     }
   }
 
+  let t = Math.round(mediaSequence * targetDuration * timescale);
+  let first = true;
   const timelineXml = timeline
     .map(([d, count]) => {
       const r = count - 1;
-      return r > 0 ? `<S d="${d}" r="${r}"/>` : `<S d="${d}"/>`;
+      const tAttr = first ? ` t="${t}"` : "";
+      first = false;
+      t += d * count;
+      return r > 0 ? `<S${tAttr} d="${d}" r="${r}"/>` : `<S${tAttr} d="${d}"/>`;
     })
     .join("");
 
@@ -491,7 +496,7 @@ function buildMpdFromReps(videoReps, audioReps, minUpdate) {
 
   return (
     '<?xml version="1.0" encoding="UTF-8"?>' +
-    '<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" profiles="urn:mpeg:dash:profile:isoff-live:2011" ' +
+    '<MPD availabilityStartTime="2024-01-01T00:00:00Z" xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic" profiles="urn:mpeg:dash:profile:isoff-live:2011" ' +
     `minimumUpdatePeriod="PT${Math.max(1, minUpdate)}S" timeShiftBufferDepth="PT120S" suggestedPresentationDelay="PT8S" publishTime="${nowIso}">` +
     '<Period id="1" start="PT0S">' +
     `<AdaptationSet id="1" mimeType="video/mp2t" segmentAlignment="true">${videoXml}</AdaptationSet>` +
@@ -748,7 +753,7 @@ async function handlePlaylist(request, signingKey, format) {
           id: `v${vIndex}`,
           bandwidth: variant.bandwidth || 1000000,
           codecs: variant.attrs.CODECS || null,
-          segmentListXml: segmentListXml(finalized.mediaSequence, finalized.segments),
+          segmentListXml: segmentListXml(finalized.mediaSequence, finalized.targetDuration, finalized.segments),
         });
         vIndex += 1;
       }
@@ -772,7 +777,7 @@ async function handlePlaylist(request, signingKey, format) {
           id: `a${aIndex}`,
           bandwidth: 128000,
           codecs: null,
-          segmentListXml: segmentListXml(finalized.mediaSequence, finalized.segments),
+          segmentListXml: segmentListXml(finalized.mediaSequence, finalized.targetDuration, finalized.segments),
         });
         aIndex += 1;
       }
@@ -785,7 +790,7 @@ async function handlePlaylist(request, signingKey, format) {
           id: "v1",
           bandwidth: 1000000,
           codecs: null,
-          segmentListXml: segmentListXml(finalized.mediaSequence, finalized.segments),
+          segmentListXml: segmentListXml(finalized.mediaSequence, finalized.targetDuration, finalized.segments),
         });
       }
     }

@@ -493,7 +493,7 @@ def _media_m3u8_to_mpd(media_text: str, bandwidth: int = 1000000, codecs: str | 
 
     return (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
-        "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" "
+        "<MPD availabilityStartTime=\"2024-01-01T00:00:00Z\" xmlns=\"urn:mpeg:dash:schema:mpd:2011\" "
         "type=\"dynamic\" "
         "profiles=\"urn:mpeg:dash:profile:isoff-live:2011\" "
         f"minimumUpdatePeriod=\"PT{min_update}S\" "
@@ -553,7 +553,7 @@ def _parse_media_segments(media_text: str) -> tuple[int, float, list[tuple[str, 
     return media_sequence, target_duration, segments
 
 
-def _segment_list_xml(media_sequence: int, segments: list[tuple[str, float]], timescale: int = 1000) -> str:
+def _segment_list_xml(media_sequence: int, target_duration: float, segments: list[tuple[str, float]], timescale: int = 1000) -> str:
     timeline: list[tuple[int, int]] = []
     for segment in segments:
         if isinstance(segment, tuple):
@@ -567,9 +567,14 @@ def _segment_list_xml(media_sequence: int, segments: list[tuple[str, float]], ti
             timeline.append((d, 1))
 
     timeline_xml = []
+    t = int(media_sequence * target_duration * timescale)
+    first = True
     for d, count in timeline:
         r = count - 1
-        timeline_xml.append(f'<S d="{d}" r="{r}"/>' if r > 0 else f'<S d="{d}"/>')
+        t_attr = f' t="{t}"' if first else ""
+        first = False
+        timeline_xml.append(f'<S{t_attr} d="{d}" r="{r}"/>' if r > 0 else f'<S{t_attr} d="{d}"/>')
+        t += d * count
 
     segment_urls_xml: list[str] = []
     for segment in segments:
@@ -621,7 +626,7 @@ def _build_mpd_from_reps(video_reps: list[dict[str, Any]], audio_reps: list[dict
 
     return (
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-        "<MPD xmlns=\"urn:mpeg:dash:schema:mpd:2011\" "
+        "<MPD availabilityStartTime=\"2024-01-01T00:00:00Z\" xmlns=\"urn:mpeg:dash:schema:mpd:2011\" "
         "type=\"dynamic\" profiles=\"urn:mpeg:dash:profile:isoff-live:2011\" "
         f"minimumUpdatePeriod=\"PT{max(1, min_update)}S\" "
         "timeShiftBufferDepth=\"PT120S\" suggestedPresentationDelay=\"PT8S\" "
@@ -827,7 +832,7 @@ def get_mpd():
                         "id": f"v{idx}",
                         "bandwidth": variant.get("bandwidth", 1000000) or 1000000,
                         "codecs": variant["attrs"].get("CODECS"),
-                        "segment_list_xml": _segment_list_xml(media_seq, segs),
+                        "segment_list_xml": _segment_list_xml(media_seq, target_dur, segs),
                     }
                 )
                 logging.info("mpd video rep %s segments=%s keyed=%s", idx, len(segs), _count_keyed_segments(segs))
@@ -849,7 +854,7 @@ def get_mpd():
                         "id": f"a{idx}",
                         "bandwidth": 128000,
                         "codecs": None,
-                        "segment_list_xml": _segment_list_xml(media_seq, segs),
+                        "segment_list_xml": _segment_list_xml(media_seq, target_dur, segs),
                     }
                 )
                 logging.info("mpd audio rep %s segments=%s keyed=%s", idx, len(segs), _count_keyed_segments(segs))
@@ -862,7 +867,7 @@ def get_mpd():
                         "id": "v1",
                         "bandwidth": 1000000,
                         "codecs": None,
-                        "segment_list_xml": _segment_list_xml(media_seq, segs),
+                        "segment_list_xml": _segment_list_xml(media_seq, target_dur, segs),
                     }
                 )
                 logging.info("mpd single playlist segments=%s keyed=%s", len(segs), _count_keyed_segments(segs))
