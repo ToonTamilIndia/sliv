@@ -283,11 +283,12 @@ function parseMasterPlaylist(masterText) {
       let j = i + 1;
       while (j < lines.length && (!lines[j] || lines[j].startsWith("#"))) j += 1;
       if (j < lines.length) {
-        const bw = Number.parseInt(attrs.BANDWIDTH || "0", 10);
+        const parsedBw = Number.parseInt(attrs.BANDWIDTH || "0", 10);
+        const bw = Number.isNaN(parsedBw) || parsedBw <= 0 ? 1000000 : parsedBw;
         variants.push({
           uri: lines[j],
           attrs,
-          bandwidth: Number.isNaN(bw) ? 0 : bw,
+          bandwidth: bw,
         });
       }
       i = j;
@@ -407,7 +408,9 @@ function parseMediaSegmentsWithKeys(mediaText, baseUrl, referer, requestUrl, sig
     const rawSegmentUrl = safeJoin(baseUrl, line);
     let ivHex = currentIvHex;
     if (currentKeyUrl && !ivHex) {
-      ivHex = hex(uint32ToBigEndian16(mediaSequence + segmentIndex));
+      const seq = BigInt(mediaSequence) + BigInt(segmentIndex);
+      const bounded = seq % (1n << 128n);
+      ivHex = hex(uint32ToBigEndian16(bounded));
     }
 
     work.push({
@@ -614,6 +617,7 @@ async function decryptDashIfNeeded(body, target, referer) {
 
     const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC" }, false, ["decrypt"]);
     const decrypted = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-CBC", iv }, cryptoKey, body));
+    if (!decrypted.length) return body;
 
     const pad = decrypted[decrypted.length - 1];
     if (pad >= 1 && pad <= 16) {

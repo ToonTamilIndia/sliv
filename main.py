@@ -16,7 +16,6 @@ import urllib.parse
 import urllib.request
 from xml.sax.saxutils import escape
 import zlib as zlib_codec
-import zlib
 from typing import Any
 from Crypto.Cipher import AES
 
@@ -76,7 +75,7 @@ def _encode_target(url: str, referer: str | None, extras: dict[str, Any] | None 
     if extras:
         payload.update(extras)
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    compressed = zlib.compress(raw, level=9)
+    compressed = zlib_codec.compress(raw, level=9)
     signature = hmac.new(SIGNING_KEY, compressed, hashlib.sha256).digest()[:12]
     return _b64u_encode(signature + compressed)
 
@@ -180,13 +179,19 @@ def _fetch(url: str, referer: str | None = None) -> tuple[bytes, dict[str, str],
                 headers.pop("content-encoding", None)
                 headers.pop("content-length", None)
             elif encoding == "deflate":
+                decompressed = False
                 try:
                     body = zlib_codec.decompress(body)
+                    decompressed = True
                 except Exception:
                     try:
                         body = zlib_codec.decompress(body, -zlib_codec.MAX_WBITS)
+                        decompressed = True
                     except Exception:
-                        pass
+                        logging.warning("deflate decode failed, forwarding raw body: %s", final_url)
+                if decompressed:
+                    headers.pop("content-encoding", None)
+                    headers.pop("content-length", None)
 
             ttl = _cache_ttl_for(final_url, headers)
             if ttl > 0:
@@ -336,7 +341,9 @@ def _pick_variant_from_master(master_text: str) -> tuple[str, dict[str, str]] | 
                 try:
                     bw = int(attrs.get("BANDWIDTH", "0"))
                 except ValueError:
-                    bw = 0
+                    bw = 1000000
+                if bw <= 0:
+                    bw = 1000000
                 variants.append((bw, uri, attrs))
             i = j
             continue
@@ -372,7 +379,9 @@ def _parse_master_playlist(master_text: str) -> tuple[list[dict[str, Any]], list
                 try:
                     bw = int(attrs.get("BANDWIDTH", "0"))
                 except ValueError:
-                    bw = 0
+                    bw = 1000000
+                if bw <= 0:
+                    bw = 1000000
                 variants.append({"uri": uri, "attrs": attrs, "bandwidth": bw})
             i = j
         i += 1
@@ -580,8 +589,10 @@ def _segment_list_xml(media_sequence: int, target_duration: float, segments: lis
     for segment in segments:
         if isinstance(segment, tuple):
             url = segment[0]
-        else:
+        elif isinstance(segment, dict):
             url = str(segment.get("url", ""))
+        else:
+            continue
         segment_urls_xml.append(f'<SegmentURL media="{escape(url)}"/>')
     return (
         f'<SegmentList timescale="{timescale}" startNumber="{media_sequence}">'
@@ -696,7 +707,7 @@ def _parse_media_segments_with_keys(media_text: str, base_url: str, referer: str
         raw_segment_url = _safe_join(base_url, line)
         iv_hex = current_iv_hex
         if current_key_url and not iv_hex:
-            seq_num = media_sequence + segment_index
+            seq_num = (media_sequence + segment_index) % (1 << 128)
             iv_hex = seq_num.to_bytes(16, byteorder="big", signed=False).hex()
 
         proxy_segment_url = _proxy_url(
@@ -761,6 +772,8 @@ def _decrypt_dash_if_needed(body: bytes, target: dict[str, Any], referer: str | 
 
         cipher = AES.new(key, AES.MODE_CBC, iv)
         decrypted = cipher.decrypt(body)
+        if not decrypted:
+            return body
         pad = decrypted[-1]
         if 1 <= pad <= 16 and decrypted.endswith(bytes([pad]) * pad):
             decrypted = decrypted[:-pad]
@@ -952,8 +965,6 @@ def _proxy_token_request(token: str):
         had_key = False
 
     response = _make_response(body, content_type)
-    if "content-length" in headers:
-        response.headers["Content-Length"] = headers["content-length"]
     response.headers["X-Proxy-Stream"] = "1"
     if request.path.startswith("/dash/"):
         response.headers["X-Proxy-Dash-Key"] = "1" if had_key else "0"
