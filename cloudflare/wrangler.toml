@@ -1,0 +1,7 @@
+name = "sliv"
+main = "worker.js"
+compatibility_date = "2026-04-03"
+workers_dev = true
+
+[vars]
+PROXY_SIGNING_KEY = "change-this-secret"
