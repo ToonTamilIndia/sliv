@@ -549,10 +549,6 @@ function looksLikeMpegTs(payload) {
   return syncHits >= Math.max(2, Math.floor(packets * 0.75));
 }
 
-function errorMessage(err) {
-  return err instanceof Error ? err.message : String(err);
-}
-
 async function fetchWithRetry(url, referer) {
   const normalized = safeUrl(url);
   const cached = cacheGet(normalized, referer);
