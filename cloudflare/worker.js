@@ -477,15 +477,10 @@ function segmentListXml(mediaSequence, targetDuration, segments, timescale = 100
     }
   }
 
-  let t = Math.round(mediaSequence * targetDuration * timescale);
-  let first = true;
   const timelineXml = timeline
     .map(([d, count]) => {
       const r = count - 1;
-      const tAttr = first ? ` t="${t}"` : "";
-      first = false;
-      t += d * count;
-      return r > 0 ? `<S${tAttr} d="${d}" r="${r}"/>` : `<S${tAttr} d="${d}"/>`;
+      return r > 0 ? `<S d="${d}" r="${r}"/>` : `<S d="${d}"/>`;
     })
     .join("");
 
