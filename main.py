@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import random
 import re
@@ -50,8 +51,8 @@ CACHE_TTL_KEY = 300
 CACHE_TTL_DEFAULT = 10
 
 def _cleanup_cache() -> None:
-    now = time.time()
     with CACHE_LOCK:
+        now = time.time()
         stale = [key for key, data in CACHE_STORE.items() if now - data["created_at"] > data["ttl"]]
         for key in stale:
             CACHE_STORE.pop(key, None)
@@ -91,7 +92,7 @@ def _decode_target(token: str) -> dict[str, Any] | None:
         if not hmac.compare_digest(signature, expected):
             return None
 
-        payload = json.loads(zlib.decompress(compressed).decode("utf-8"))
+        payload = json.loads(zlib_codec.decompress(compressed).decode("utf-8"))
         expires_at = int(payload.get("e", 0))
         if expires_at < int(time.time()):
             return None
@@ -107,7 +108,7 @@ def _decode_target(token: str) -> dict[str, Any] | None:
 
 
 def _cache_key(url: str, referer: str | None) -> str:
-    return f"{referer or ''}\n{url}"
+    return hashlib.sha256(f"{referer or ''}\x00{url}".encode("utf-8")).hexdigest()
 
 
 def _cache_get(url: str, referer: str | None) -> tuple[bytes, dict[str, str], str] | None:
@@ -223,7 +224,8 @@ def _safe_url(url: str) -> str:
         return f"https:{url}"
     if "://" not in url:
         return f"https://{url.lstrip('/')}"
-    return url
+    stripped = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", url).lstrip("/")
+    return f"https://{stripped}"
 
 
 def _resolve_source(user_id: str) -> tuple[str, str]:
@@ -428,8 +430,7 @@ def _filter_master_playlist(master_text: str, selected_variants: list[dict[str, 
             while j < len(lines) and (not lines[j].strip() or lines[j].strip().startswith("#")):
                 j += 1
             if j < len(lines) and lines[j].strip() in allowed_uris:
-                out.append(line)
-                out.append(lines[j])
+                out.extend(lines[i : j + 1])
             i = j + 1
             continue
 
@@ -497,7 +498,7 @@ def _media_m3u8_to_mpd(media_text: str, bandwidth: int = 1000000, codecs: str | 
     segment_urls_xml = [f'<SegmentURL media="{escape(url)}"/>' for url, _ in segments]
 
     now_iso = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    min_update = max(1, int(round(target_duration)))
+    min_update = max(1, int(math.ceil(target_duration)))
     codec_attr = f' codecs="{escape(codecs)}"' if codecs else ""
 
     return (
@@ -563,6 +564,9 @@ def _parse_media_segments(media_text: str) -> tuple[int, float, list[tuple[str, 
 
 
 def _segment_list_xml(media_sequence: int, target_duration: float, segments: list[tuple[str, float]], timescale: int = 1000) -> str:
+    if not segments:
+        raise ValueError("Cannot generate SegmentList with zero segments")
+
     timeline: list[tuple[int, int]] = []
     for segment in segments:
         if isinstance(segment, tuple):
@@ -576,7 +580,7 @@ def _segment_list_xml(media_sequence: int, target_duration: float, segments: lis
             timeline.append((d, 1))
 
     timeline_xml = []
-    t = int(media_sequence * target_duration * timescale)
+    t = int(round(media_sequence * target_duration * timescale))
     first = True
     for d, count in timeline:
         r = count - 1
@@ -707,7 +711,9 @@ def _parse_media_segments_with_keys(media_text: str, base_url: str, referer: str
         raw_segment_url = _safe_join(base_url, line)
         iv_hex = current_iv_hex
         if current_key_url and not iv_hex:
-            seq_num = (media_sequence + segment_index) % (1 << 128)
+            seq_num = media_sequence + segment_index
+            if seq_num < 0:
+                seq_num = 0
             iv_hex = seq_num.to_bytes(16, byteorder="big", signed=False).hex()
 
         proxy_segment_url = _proxy_url(
@@ -743,7 +749,7 @@ def _looks_like_mpeg_ts(payload: bytes) -> bool:
         return False
 
     packets = min(8, len(payload) // 188)
-    if packets <= 1:
+    if packets <= 3:
         return payload[0] == 0x47
 
     sync_hits = 0
@@ -772,8 +778,6 @@ def _decrypt_dash_if_needed(body: bytes, target: dict[str, Any], referer: str | 
 
         cipher = AES.new(key, AES.MODE_CBC, iv)
         decrypted = cipher.decrypt(body)
-        if not decrypted:
-            return body
         pad = decrypted[-1]
         if 1 <= pad <= 16 and decrypted.endswith(bytes([pad]) * pad):
             decrypted = decrypted[:-pad]
@@ -868,7 +872,7 @@ def get_mpd():
                 media_seq, target_dur, segs = _parse_media_segments_with_keys(v_text, vf, referer)
                 if not segs:
                     continue
-                min_update = min(min_update, max(1, int(round(target_dur))))
+                min_update = min(min_update, max(1, int(math.ceil(target_dur))))
                 video_reps.append(
                     {
                         "id": f"v{idx}",
@@ -890,7 +894,7 @@ def get_mpd():
                 media_seq, target_dur, segs = _parse_media_segments_with_keys(a_text, af, referer)
                 if not segs:
                     continue
-                min_update = min(min_update, max(1, int(round(target_dur))))
+                min_update = min(min_update, max(1, int(math.ceil(target_dur))))
                 audio_reps.append(
                     {
                         "id": f"a{idx}",
@@ -903,7 +907,7 @@ def get_mpd():
         else:
             media_seq, target_dur, segs = _parse_media_segments_with_keys(master_text, final_url, referer)
             if segs:
-                min_update = max(1, int(round(target_dur)))
+                min_update = max(1, int(math.ceil(target_dur)))
                 video_reps.append(
                     {
                         "id": "v1",

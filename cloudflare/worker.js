@@ -14,6 +14,7 @@ const CACHE_TTL_PLAYLIST = 2;
 const CACHE_TTL_SEGMENT = 30;
 const CACHE_TTL_KEY = 300;
 const CACHE_TTL_DEFAULT = 10;
+const CACHE_MAX_ENTRIES = 2000;
 
 const cacheStore = new Map();
 
@@ -31,15 +32,18 @@ function cleanupCache() {
 }
 
 function cacheKey(url, referer) {
-  return `${referer || ""}\n${url}`;
+  return `${(referer || "").length}:${referer || ""}\x00${url.length}:${url}`;
 }
 
 function cacheGet(url, referer) {
   cleanupCache();
-  return cacheStore.get(cacheKey(url, referer)) || null;
+  const cached = cacheStore.get(cacheKey(url, referer));
+  if (!cached) return null;
+  return { body: cached.body, headers: cached.headers, finalUrl: cached.finalUrl };
 }
 
 function cacheSet(url, referer, body, headers, finalUrl, ttl) {
+  cleanupCache();
   cacheStore.set(cacheKey(url, referer), {
     body,
     headers,
@@ -47,6 +51,12 @@ function cacheSet(url, referer, body, headers, finalUrl, ttl) {
     ttl,
     createdAt: Date.now(),
   });
+
+  while (cacheStore.size > CACHE_MAX_ENTRIES) {
+    const firstKey = cacheStore.keys().next().value;
+    if (firstKey === undefined) break;
+    cacheStore.delete(firstKey);
+  }
 }
 
 function cacheTtlFor(url, headers) {
@@ -81,7 +91,8 @@ function safeUrl(url) {
 
   if (url.startsWith("//")) return `https:${url}`;
   if (!url.includes("://")) return `https://${url.replace(/^\/+/, "")}`;
-  return url;
+  const stripped = url.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, "").replace(/^\/+/, "");
+  return `https://${stripped}`;
 }
 
 function toBase64Url(bytes) {
@@ -105,6 +116,7 @@ function hex(bytes) {
 
 function hexToBytes(value) {
   if (!value || value.length % 2 !== 0) return null;
+  if (!/^[0-9a-fA-F]+$/.test(value)) return null;
   const out = new Uint8Array(value.length / 2);
   for (let i = 0; i < value.length; i += 2) {
     const chunk = value.slice(i, i + 2);
@@ -115,13 +127,17 @@ function hexToBytes(value) {
   return out;
 }
 
-function uint32ToBigEndian16(value) {
+function bigIntToBigEndian128(value) {
   const out = new Uint8Array(16);
   const n = BigInt(value);
   for (let i = 15; i >= 0; i -= 1) {
     out[i] = Number((n >> BigInt((15 - i) * 8)) & BigInt(0xff));
   }
   return out;
+}
+
+function errorMessage(err) {
+  return err instanceof Error ? err.message : String(err);
 }
 
 async function signPayload(payloadBytes, signingKey) {
@@ -162,7 +178,7 @@ async function decodeTarget(token, signingKey) {
     }
 
     const payload = JSON.parse(new TextDecoder().decode(payloadBytes));
-    const expiresAt = Number.parseInt(payload.e || "0", 10);
+    const expiresAt = typeof payload.e === "number" ? payload.e : 0;
     if (expiresAt < nowSeconds()) return null;
 
     return {
@@ -193,20 +209,19 @@ async function proxyUrl(url, referer, requestUrl, signingKey, routePath = "strea
   return `${base.origin}/${routePath}/${token}`;
 }
 
-const URI_ATTR_RE = /URI="([^"]+)"/g;
-
 async function rewriteM3u8(text, baseUrl, referer, requestUrl, signingKey, routePath = "stream") {
   const rewritten = [];
   const lines = text.split(/\r?\n/);
+  const uriAttrRe = /URI="([^"]+)"/g;
 
   for (const line of lines) {
     if (line.startsWith("#")) {
       if (line.includes('URI="')) {
         let output = "";
         let last = 0;
-        URI_ATTR_RE.lastIndex = 0;
+        uriAttrRe.lastIndex = 0;
         let match;
-        while ((match = URI_ATTR_RE.exec(line)) !== null) {
+        while ((match = uriAttrRe.exec(line)) !== null) {
           output += line.slice(last, match.index);
           const target = safeJoin(baseUrl, match[1]);
           const proxied = await proxyUrl(target, referer, requestUrl, signingKey, routePath);
@@ -254,7 +269,8 @@ function isMasterPlaylist(text) {
 
 function parseAttrList(line) {
   const attrs = {};
-  const payload = line.includes(":") ? line.split(":", 2)[1] : "";
+  const idx = line.indexOf(":");
+  const payload = idx !== -1 ? line.slice(idx + 1) : "";
   const re = /([A-Z0-9-]+)=(("[^"]*")|[^,]*)/g;
   let match;
   while ((match = re.exec(payload)) !== null) {
@@ -335,8 +351,7 @@ function filterMasterPlaylist(masterText, selectedVariants) {
       let j = i + 1;
       while (j < lines.length && (!lines[j].trim() || lines[j].trim().startsWith("#"))) j += 1;
       if (j < lines.length && allowedUris.has(lines[j].trim())) {
-        out.push(line);
-        out.push(lines[j]);
+        out.push(...lines.slice(i, j + 1));
       }
       i = j;
       continue;
@@ -409,8 +424,8 @@ function parseMediaSegmentsWithKeys(mediaText, baseUrl, referer, requestUrl, sig
     let ivHex = currentIvHex;
     if (currentKeyUrl && !ivHex) {
       const seq = BigInt(mediaSequence) + BigInt(segmentIndex);
-      const bounded = seq % (1n << 128n);
-      ivHex = hex(uint32ToBigEndian16(bounded));
+      const bounded = seq < 0n ? 0n : seq;
+      ivHex = hex(bigIntToBigEndian128(bounded));
     }
 
     work.push({
@@ -447,6 +462,10 @@ async function finalizeSegmentWork(parsed) {
 }
 
 function segmentListXml(mediaSequence, targetDuration, segments, timescale = 1000) {
+  if (!segments.length) {
+    throw new Error("Cannot generate SegmentList with zero segments");
+  }
+
   const timeline = [];
   for (const segment of segments) {
     const d = Math.max(1, Math.round(segment.duration * timescale));
@@ -521,13 +540,17 @@ function looksLikeMpegTs(payload) {
   if (payload[0] !== 0x47) return false;
 
   const packets = Math.min(8, Math.floor(payload.length / 188));
-  if (packets <= 1) return payload[0] === 0x47;
+  if (packets <= 3) return payload[0] === 0x47;
 
   let syncHits = 0;
   for (let i = 0; i < packets; i += 1) {
     if (payload[i * 188] === 0x47) syncHits += 1;
   }
   return syncHits >= Math.max(2, Math.floor(packets * 0.75));
+}
+
+function errorMessage(err) {
+  return err instanceof Error ? err.message : String(err);
 }
 
 async function fetchWithRetry(url, referer) {
@@ -618,22 +641,6 @@ async function decryptDashIfNeeded(body, target, referer) {
     const cryptoKey = await crypto.subtle.importKey("raw", keyBytes, { name: "AES-CBC" }, false, ["decrypt"]);
     const decrypted = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-CBC", iv }, cryptoKey, body));
     if (!decrypted.length) return body;
-
-    const pad = decrypted[decrypted.length - 1];
-    if (pad >= 1 && pad <= 16) {
-      let validPad = true;
-      for (let i = decrypted.length - pad; i < decrypted.length; i += 1) {
-        if (decrypted[i] !== pad) {
-          validPad = false;
-          break;
-        }
-      }
-      if (validPad) {
-        const unpadded = decrypted.slice(0, decrypted.length - pad);
-        return looksLikeMpegTs(unpadded) ? unpadded : body;
-      }
-    }
-
     return looksLikeMpegTs(decrypted) ? decrypted : body;
   } catch (_err) {
     return body;
@@ -659,7 +666,7 @@ async function proxyTokenRequest(request, token, signingKey, routePrefix) {
     finalUrl = fetched.finalUrl;
   } catch (err) {
     const status = err && err.status ? err.status : 502;
-    const payload = err && err.body ? err.body : new TextEncoder().encode(String(err));
+    const payload = err && err.body ? err.body : new TextEncoder().encode(errorMessage(err));
     return makeResponse(payload, "text/plain; charset=utf-8", status);
   }
 
@@ -710,7 +717,7 @@ async function handlePlaylist(request, signingKey, format) {
     upstreamUrl = source.upstreamUrl;
     referer = source.referer;
   } catch (err) {
-    return new Response(JSON.stringify({ status: "error", message: String(err) }), {
+    return new Response(JSON.stringify({ status: "error", message: errorMessage(err) }), {
       status: 502,
       headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
     });
@@ -725,7 +732,7 @@ async function handlePlaylist(request, signingKey, format) {
     headers = fetched.headers;
     finalUrl = fetched.finalUrl;
   } catch (err) {
-    return new Response(JSON.stringify({ status: "error", message: String(err) }), {
+    return new Response(JSON.stringify({ status: "error", message: errorMessage(err) }), {
       status: 502,
       headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
     });
@@ -778,7 +785,7 @@ async function handlePlaylist(request, signingKey, format) {
         const finalized = await finalizeSegmentWork(parsed);
         if (!finalized.segments.length) continue;
 
-        minUpdate = Math.min(minUpdate, Math.max(1, Math.round(finalized.targetDuration)));
+        minUpdate = Math.min(minUpdate, Math.max(1, Math.ceil(finalized.targetDuration)));
         videoReps.push({
           id: `v${vIndex}`,
           bandwidth: variant.bandwidth || 1000000,
@@ -802,7 +809,7 @@ async function handlePlaylist(request, signingKey, format) {
         const finalized = await finalizeSegmentWork(parsed);
         if (!finalized.segments.length) continue;
 
-        minUpdate = Math.min(minUpdate, Math.max(1, Math.round(finalized.targetDuration)));
+        minUpdate = Math.min(minUpdate, Math.max(1, Math.ceil(finalized.targetDuration)));
         audioReps.push({
           id: `a${aIndex}`,
           bandwidth: 128000,
@@ -815,7 +822,7 @@ async function handlePlaylist(request, signingKey, format) {
       const parsed = parseMediaSegmentsWithKeys(masterText, finalUrl, referer, request.url, signingKey);
       const finalized = await finalizeSegmentWork(parsed);
       if (finalized.segments.length) {
-        minUpdate = Math.max(1, Math.round(finalized.targetDuration));
+        minUpdate = Math.max(1, Math.ceil(finalized.targetDuration));
         videoReps.push({
           id: "v1",
           bandwidth: 1000000,
@@ -832,7 +839,7 @@ async function handlePlaylist(request, signingKey, format) {
       "X-Proxy-MPD": "1",
     });
   } catch (err) {
-    return new Response(JSON.stringify({ status: "error", message: String(err) }), {
+    return new Response(JSON.stringify({ status: "error", message: errorMessage(err) }), {
       status: 502,
       headers: { "content-type": "application/json", "access-control-allow-origin": "*" },
     });
