@@ -31,15 +31,11 @@ logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s %(me
 
 UPSTREAM_SOURCES = [
     {
-        "template": "https://sliv.tulnit.fun/stream.php?id={id}&e=.m3u8",
-        "referer": "https://tulnit.com/",
-    },
-    {
         "template": "https://playyonogames.in/sliv/stream.php?id={id}&e=.m3u8",
         "referer": "https://playyonogames.in/",
     },
     {
-        "template": "https://mhdtvhub.com/sliv/stream.php?id={id}&e=.m3u8",
+        "template": "https://alymize.com/sliv/stream.php?id={id}&e=.m3u8",
         "referer": "https://mhdtvhub.com/",
     },
 ]
